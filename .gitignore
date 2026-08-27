@@ -2,3 +2,6 @@
 .env
 DEPLOY_KEY.txt
 node_modules/
+gmail-creds.json
+DEPLOY_FLY_TOKEN.txt
+DEPLOY_KEY.txt

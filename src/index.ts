@@ -1,13 +1,14 @@
-// MCP streamable-HTTP server exposing the full openrecord capability surface
-// for every configured account, plus account/session management tools.
+// MCP bridge server: minimal stateless JSON-RPC over streamable HTTP.
+// Tools wrap the openrecord engine's full capability surface for every
+// configured account, plus account/session management.
 
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
+import { createServer as httpCreateServer } from "node:http";
 import { z } from "zod";
-import { createServer as httpCreateServer, type IncomingMessage, type ServerResponse } from "node:http";
-import { loadInstances, bridgeApiKey, accountKey, type InstanceConfig } from "./config";
+import { zodToJsonSchema } from "zod-to-json-schema";
+import { loadInstances, accountKey, type InstanceConfig } from "./config";
 import { ensureSchema, getClient, checkStatus, completeManual2Fa, beginManualLogin, closeAll } from "./manager";
 import { fetchSessionCsrfToken } from "../../openrecord/scrapers/myChart/core/csrf";
+import { makeDispatcher, type ToolDef } from "./jsonrpc";
 
 const CAPABILITY_IDS = [
   "get_profile", "get_health_summary", "get_medications", "get_allergies", "get_health_issues",
@@ -34,55 +35,64 @@ async function withClient(account: string, fn: (inst: InstanceConfig, client: Aw
   return fn(inst, client);
 }
 
-function buildServer(): McpServer {
-  const server = new McpServer({ name: "mychart-bridge", version: "1.0.0" });
+function textResult(value: unknown, isError = false) {
+  return { content: [{ type: "text", text: JSON.stringify(value, null, 1).slice(0, 100_000) }], isError };
+}
 
-  server.tool(
-    "list_accounts",
-    "List all configured MyChart accounts with connection status",
-    {},
-    async () => {
-      const statuses = await Promise.all(instances.map((i) => checkStatus(i)));
-      return { content: [{ type: "text", text: JSON.stringify(statuses, null, 1) }] };
+const tools: ToolDef[] = [
+  {
+    name: "list_accounts",
+    description: "List all configured MyChart accounts with connection status",
+    inputSchema: { type: "object", properties: {}, additionalProperties: false },
+    run: async () => Promise.all(instances.map((i) => checkStatus(i))),
+  },
+  {
+    name: "run_capability",
+    description:
+      "Run any openrecord capability against an account's live MyChart session. " +
+      "Capabilities: " + CAPABILITY_IDS.join(", ") + ". " +
+      "Arg shapes: send_message {subject,message,recipient?(provider display name),topic?}; send_reply {conversationId,message}; " +
+      "request_refill {medication_name}.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        account: { type: "string", description: "Account: owner ('bill'/'lenna') or 'owner:hostname'" },
+        capability: { type: "string", description: "Capability id" },
+        args: { type: "object", description: "Capability arguments", additionalProperties: true },
+      },
+      required: ["account", "capability"],
     },
-  );
-
-  server.tool(
-    "run_capability",
-    "Run any openrecord capability against an account's live MyChart session. " +
-    "Capabilities: " + CAPABILITY_IDS.join(", ") + ". " +
-    "Arg shapes: send_message {subject,message,recipient?(provider display name),topic?}; send_reply {conversationId,message}; " +
-    "request_refill {medication_name}; get_note_content/get_message_thread/get_visit_notes need {csn} or {messageId} — see sibling list output.",
-    {
-      account: z.string().describe("Account: owner ('bill'/'lenna') or 'owner:hostname'"),
-      capability: z.string().describe("Capability id"),
-      args: z.record(z.unknown()).optional().describe("Capability arguments"),
-    },
-    async ({ account, capability, args }) => {
+    run: async (args) => {
+      const { account, capability } = args as { account: string; capability: string };
       if (!CAPABILITY_IDS.includes(capability)) {
         throw new Error(`unknown capability ${capability}; valid: ${CAPABILITY_IDS.join(", ")}`);
       }
-      const result = await withClient(account, (_inst, client) =>
-        client.runCapability(capability, args ?? {}));
-      return { content: [{ type: "text", text: JSON.stringify(result, null, 1).slice(0, 100_000) }] };
+      const capArgs = (args.args ?? {}) as Record<string, unknown>;
+      return withClient(account, (_inst, client) => client.runCapability(capability, capArgs));
     },
-  );
-
-  server.tool(
-    "run_raw_endpoint",
-    "Authenticated arbitrary portal API call through a live MyChart session — the escape hatch for " +
-    "write flows not yet modeled as capabilities (bill pay, contact preferences, scheduling). " +
-    "Path is instance-relative, e.g. '/api/bill-pay/GetBillPayData'. " +
-    "CSRF token is auto-fetched and attached as __RequestVerificationToken. " +
-    "DISCLAIMER: POSTs with Save*/Pay*/Delete* MUTATE the account — pass a body only when you mean it.",
-    {
-      account: z.string().describe("Account: owner ('bill'/'lenna') or 'owner:hostname'"),
-      method: z.enum(["GET", "POST"]).describe("HTTP method"),
-      path: z.string().describe("Instance-relative path starting with /"),
-      body: z.record(z.unknown()).optional().describe("JSON body (auto-stringified)"),
-      needsCsrf: z.boolean().optional().describe("Attach __RequestVerificationToken (default true for POST)"),
+  },
+  {
+    name: "run_raw_endpoint",
+    description:
+      "Authenticated arbitrary portal API call through a live MyChart session — the escape hatch for " +
+      "write flows not yet modeled as capabilities (bill pay, contact preferences, scheduling). " +
+      "Path is instance-relative, e.g. '/api/bill-pay/GetBillPayData'. " +
+      "CSRF token auto-attached. WARNING: POSTs with Save*/Pay*/Delete* MUTATE the account.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        account: { type: "string", description: "Account: owner ('bill'/'lenna') or 'owner:hostname'" },
+        method: { type: "string", enum: ["GET", "POST"], description: "HTTP method" },
+        path: { type: "string", description: "Instance-relative path starting with /" },
+        body: { type: "object", description: "JSON body (auto-stringified)", additionalProperties: true },
+        needsCsrf: { type: "boolean", description: "Attach __RequestVerificationToken (default true for POST)" },
+      },
+      required: ["account", "method", "path"],
     },
-    async ({ account, method, path, body, needsCsrf }) => {
+    run: async (args) => {
+      const { account, method, path } = args as { account: string; method: "GET" | "POST"; path: string };
+      const body = args.body as Record<string, unknown> | undefined;
+      const needsCsrf = args.needsCsrf as boolean | undefined;
       return withClient(account, async (_inst, client) => {
         const isPost = method === "POST";
         const headers: Record<string, string> = {};
@@ -97,75 +107,59 @@ function buildServer(): McpServer {
         }
         const res = await client.request.makeRequest({ path, method, headers, body: payload });
         const text = await res.text();
-        return {
-          content: [{
-            type: "text",
-            text: JSON.stringify({ status: res.status, url: res.url, body: text.slice(0, 100_000) }),
-          }],
-        };
+        return { status: res.status, url: res.url, body: text.slice(0, 100_000) };
       });
     },
-  );
-
-  server.tool(
-    "begin_login",
-    "Kick off a manual password login for an account without an autonomous 2FA path. Returns need_2fa; then call complete_2fa with the code.",
-    { account: z.string() },
-    async ({ account }) => {
-      const inst = byAccount.get(account);
-      if (!inst) throw new Error(`unknown account: ${account}`);
+  },
+  {
+    name: "begin_login",
+    description: "Kick off a manual password login for an account without an autonomous 2FA path. Returns need_2fa; then call complete_2fa with the code.",
+    inputSchema: {
+      type: "object",
+      properties: { account: { type: "string" } },
+      required: ["account"],
+    },
+    run: async (args) => {
+      const inst = byAccount.get(args.account as string);
+      if (!inst) throw new Error(`unknown account: ${args.account}`);
       const state = await beginManualLogin(inst);
-      return { content: [{ type: "text", text: JSON.stringify({ account, state }) }] };
+      return { account: args.account, state };
     },
-  );
-
-  server.tool(
-    "complete_2fa",
-    "Complete a pending 2FA challenge with a human-provided code",
-    { account: z.string(), code: z.string().describe("6-digit code") },
-    async ({ account, code }) => {
-      const inst = byAccount.get(account);
-      if (!inst) throw new Error(`unknown account: ${account}`);
-      const ok = await completeManual2Fa(inst, code);
-      return { content: [{ type: "text", text: JSON.stringify({ account, ok }) }] };
+  },
+  {
+    name: "complete_2fa",
+    description: "Complete a pending 2FA challenge with a human-provided code",
+    inputSchema: {
+      type: "object",
+      properties: { account: { type: "string" }, code: { type: "string", description: "6-digit code" } },
+      required: ["account", "code"],
     },
-  );
-
-  return server;
-}
-
-// ---- HTTP wiring: bearer auth + fully stateless MCP (multi-machine safe) ----
-
-async function handleMcp(req: IncomingMessage, res: ServerResponse): Promise<void> {
-  const auth = req.headers.authorization ?? "";
-  if (auth !== `Bearer ${bridgeApiKey()}`) {
-    res.writeHead(401, { "Content-Type": "application/json" });
-    res.end(JSON.stringify({ error: "unauthorized" }));
-    return;
-  }
-  if (req.method !== "POST") {
-    // Stateless mode: no GET (SSE) or DELETE (session terminate) sessions exist.
-    res.writeHead(405).end(JSON.stringify({ error: "method not allowed; POST JSON-RPC only" }));
-    return;
-  }
-  const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
-  transport.onerror = (e) => console.error("[transport error]", e);
-  try {
-    const server = buildServer();
-    await server.connect(transport);
-    await transport.handleRequest(req, res);
-  } finally {
-    await transport.close().catch(() => {});
-  }
-}
+    run: async (args) => {
+      const inst = byAccount.get(args.account as string);
+      if (!inst) throw new Error(`unknown account: ${args.account}`);
+      const ok = await completeManual2Fa(inst, args.code as string);
+      return { account: args.account, ok };
+    },
+  },
+];
 
 export async function startServer(port: number): Promise<void> {
   await ensureSchema();
+  const handle = makeDispatcher(tools);
   const httpServer = httpCreateServer(async (req, res) => {
     if (req.url?.startsWith("/mcp")) {
-      await handleMcp(req, res).catch((err) => {
-        console.error("mcp error", err);
-        if (!res.headersSent) res.writeHead(500).end(JSON.stringify({ error: String(err) }));
+      let body = "";
+      req.on("data", (c: Buffer) => { body += c.toString(); });
+      req.on("end", async () => {
+        try {
+          await handle(req, res, body);
+        } catch (err) {
+          console.error("mcp error", err);
+          if (!res.headersSent) {
+            res.writeHead(500, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({ error: String(err) }));
+          }
+        }
       });
       return;
     }

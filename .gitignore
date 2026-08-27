@@ -1,0 +1,4 @@
+.env.local
+.env
+DEPLOY_KEY.txt
+node_modules/

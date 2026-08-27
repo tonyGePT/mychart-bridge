@@ -2,7 +2,7 @@ FROM oven/bun:1
 
 WORKDIR /app
 
-# Pin the engine at the commit the production connector deploys
+RUN apt-get update -qq && apt-get install -y -qq git ca-certificates && rm -rf /var/lib/apt/lists/*
 RUN git clone --depth 1 https://github.com/Fan-Pier-Labs/openrecord.git /openrecord
 COPY package.json ./
 COPY src ./src

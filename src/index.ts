@@ -91,11 +91,10 @@ server.tool(
     return { content: [{ type: "text", text: JSON.stringify({ account, ok }) }] };
   },
 );
-
+  return server;
 } // buildServer
 
 // ---- HTTP wiring: bearer auth + stateless streamable HTTP sessions ----
-
 const transports = new Map<string, StreamableHTTPServerTransport>();
 
 async function handleMcp(req: IncomingMessage, res: ServerResponse): Promise<void> {

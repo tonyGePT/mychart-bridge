@@ -4,7 +4,6 @@
 // tools/list, tools/call.
 
 import type { IncomingMessage, ServerResponse } from "node:http";
-import { bridgeApiKey } from "./config";
 
 export interface ToolDef {
   name: string;
@@ -27,10 +26,6 @@ export function makeDispatcher(tools: ToolDef[]) {
     res: ServerResponse,
     body: string,
   ): Promise<void> {
-    const auth = req.headers.authorization ?? "";
-    if (auth !== `Bearer ${bridgeApiKey()}`) {
-      return sendJson(res, 401, { error: "unauthorized" });
-    }
 
     let msg: any;
     try {

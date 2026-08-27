@@ -312,7 +312,9 @@ export async function startServer(port: number): Promise<void> {
           method: req.method,
           headers: req.headers as unknown as HeadersInit,
         }));
+        console.error(`[/mcp] ${req.method} authed=${ok}`);
         if (!ok) {
+          console.error("[/mcp] REJECTING with 401");
           res.writeHead(401, {
             "Content-Type": "application/json",
             "WWW-Authenticate": `Bearer resource_metadata="${ISSUER}/.well-known/oauth-protected-resource"`,

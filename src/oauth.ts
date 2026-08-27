@@ -29,11 +29,18 @@ export async function ensureOAuthSchema(): Promise<void> {
 /** Static bridge key OR a valid issued access token. */
 export async function isAuthorized(req: Request): Promise<boolean> {
   const auth = req.headers.get("authorization") ?? "";
+  console.error("[auth] header present:", auth.startsWith("Bearer "), "| len:", auth.length);
   if (!auth.startsWith("Bearer ")) return false;
   const token = auth.slice(7).trim();
   if (token === bridgeApiKey()) return true;
-  const rows = await sql`select 1 from oauth_tokens where token = ${token} and expires_at > now() limit 1`;
-  return rows.length > 0;
+  try {
+    const rows = await sql`select 1 from oauth_tokens where token = ${token} and expires_at > now() limit 1`;
+    console.error("[auth] db rows:", rows.length);
+    return rows.length > 0;
+  } catch (e) {
+    console.error("[auth] db error:", String(e).slice(0, 200));
+    return false;
+  }
 }
 
 export function oauthError(res: ResponseInit & { headers?: HeadersInit }, status: number, body: unknown): Response {

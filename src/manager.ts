@@ -126,23 +126,37 @@ export async function getClient(inst: InstanceConfig): Promise<MyChartClient> {
 
   // 3) fresh autonomous login
   if (inst.passkey) {
-    const cred = normalizePasskey(inst.passkey) ?? (row?.passkey ? JSON.parse(row.passkey) : null);
-    if (cred) {
-      const credential = deserializeCredential(JSON.stringify(cred));
-      const res = await MyChartClient.connectWithPasskey({
-        hostname: inst.hostname, credential, keepalive: false, autoRenew: true,
-      });
-      if (res.state === "connected") {
-        // persist bumped signCount
-        inst.passkey = JSON.parse(serializeCredential(credential));
-        await persistClient(account, res.client, inst);
-        clients.set(account, res.client);
-        return res.client;
+    // Freshness matters: the WebAuthn signature counter only moves forward.
+    // The DB row holds the counter from the most recent successful login;
+    // INSTANCES_JSON holds the counter as of initial extraction (stale).
+    const dbCred = row?.passkey ? normalizePasskey(JSON.parse(row.passkey)) : null;
+    const envCred = normalizePasskey(inst.passkey);
+    const base = dbCred ?? envCred;
+    if (base) {
+      // Sweep the counter forward: portal rejects any counter <= its last-seen
+      // value, and we may be several logins behind after process restarts.
+      for (let delta = 0; delta <= 15; delta++) {
+        const credential = { ...base, signCount: base.signCount + delta };
+        try {
+          const res = await MyChartClient.connectWithPasskey({
+            hostname: inst.hostname, credential, keepalive: false, autoRenew: true,
+          });
+          if (res.state === "connected") {
+            inst.passkey = JSON.parse(serializeCredential(credential));
+            await persistClient(account, res.client, inst);
+            clients.set(account, res.client);
+            console.error(`[${account}] passkey login ok (signCount ${credential.signCount}, delta ${delta})`);
+            return res.client;
+          }
+          if (res.state === "error") break; // network-ish failure: don't sweep
+        } catch (e) {
+          console.error(`[${account}] passkey attempt delta ${delta} threw:`, String(e).slice(0, 120));
+          break;
+        }
       }
-      console.error(`[${account}] passkey login failed (${res.state}), falling back to password`);
+      console.error(`[${account}] passkey login failed after counter sweep, falling back to password`);
     }
   }
-
   if (inst.totpSecret) {
     const res = await MyChartClient.connect({
       hostname: inst.hostname, user: inst.username, pass: inst.password,

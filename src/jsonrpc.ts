@@ -78,7 +78,7 @@ export function makeDispatcher(tools: ToolDef[]) {
           // MCP tools must return a content envelope; wrap raw values.
           const result = (raw !== null && typeof raw === "object" && "content" in raw)
             ? raw as { content: unknown; isError?: boolean }
-            : { content: [{ type: "text", text: JSON.stringify(raw, null, 1).slice(0, 100_000) }] };
+            : { content: [{ type: "text", text: JSON.stringify(raw, null, 1).slice(0, 500_000) }] };
           return reply(result);
         } catch (err) {
           return reply({

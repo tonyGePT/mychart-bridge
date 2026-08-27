@@ -36,7 +36,7 @@ async function withClient(account: string, fn: (inst: InstanceConfig, client: Aw
 }
 
 function textResult(value: unknown, isError = false) {
-  return { content: [{ type: "text", text: JSON.stringify(value, null, 1).slice(0, 100_000) }], isError };
+  return { content: [{ type: "text", text: JSON.stringify(value, null, 1).slice(0, 500_000) }], isError };
 }
 
 const tools: ToolDef[] = [
@@ -107,7 +107,7 @@ const tools: ToolDef[] = [
         }
         const res = await client.request.makeRequest({ path, method, headers, body: payload });
         const text = await res.text();
-        return { status: res.status, url: res.url, body: text.slice(0, 100_000) };
+        return { status: res.status, url: res.url, body: text.slice(0, 500_000) };
       });
     },
   },

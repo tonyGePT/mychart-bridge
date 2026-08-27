@@ -151,9 +151,12 @@ const tools: ToolDef[] = [
       required: ["account"],
     },
     run: async (args) => withClient(args.account as string, async (_inst, client) => {
-      const load = await client.request.makeRequest({ path: "/Clinical/CareTeam/Load", method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" });
+      const csrf = await fetchSessionCsrfToken(client.request);
+      const headers: Record<string, string> = { "Content-Type": "application/json" };
+      if (csrf) headers.__RequestVerificationToken = csrf;
+      const load = await client.request.makeRequest({ path: "/Clinical/CareTeam/Load", method: "POST", headers, body: "{}" });
       const loadJson = await load.json().catch(() => null);
-      const ext = await client.request.makeRequest({ path: "/Clinical/CareTeam/LoadExternal", method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" });
+      const ext = await client.request.makeRequest({ path: "/Clinical/CareTeam/LoadExternal", method: "POST", headers, body: "{}" });
       const extJson = await ext.json().catch(() => null);
       return {
         providers: loadJson?.ProvidersList ?? [],

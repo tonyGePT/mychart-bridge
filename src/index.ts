@@ -308,13 +308,14 @@ export async function startServer(port: number): Promise<void> {
         return;
       }
       if (url.pathname.startsWith("/mcp")) {
+        // Read the body FIRST: bun's node-compat drops request data that
+        // arrives while we await the auth DB lookup.
+        const body = await readBody(req);
         const ok = await isAuthorized(new Request(ISSUER + url.pathname + url.search, {
           method: req.method,
           headers: req.headers as unknown as HeadersInit,
         }));
-        console.error(`[/mcp] ${req.method} authed=${ok}`);
         if (!ok) {
-          console.error("[/mcp] REJECTING with 401");
           res.writeHead(401, {
             "Content-Type": "application/json",
             "WWW-Authenticate": `Bearer resource_metadata="${ISSUER}/.well-known/oauth-protected-resource"`,
@@ -322,25 +323,13 @@ export async function startServer(port: number): Promise<void> {
           res.end(JSON.stringify({ error: "unauthorized" }));
           return;
         }
-        let body = "";
-        req.on("data", (c: Buffer) => { body += c.toString(); });
-        req.on("end", async () => {
-          try {
-            await handle(req, res, body);
-          } catch (err) {
-            console.error("mcp error", err);
-            if (!res.headersSent) {
-              res.writeHead(500, { "Content-Type": "application/json" });
-              res.end(JSON.stringify({ error: String(err) }));
-            }
-          }
-        });
+        await handle(req, res, body);
         return;
       }
       res.writeHead(404).end();
     } catch (err) {
       console.error("server error", err);
-      if (!res.headersSent) res.writeHead(500).end(JSON.stringify({ error: String(err) }));
+      if (!res.headersSent) res.writeHead(500, { "Content-Type": "application/json" }).end(JSON.stringify({ error: String(err) }));
     }
   });
   await new Promise<void>((resolve) => httpServer.listen(port, () => resolve()));

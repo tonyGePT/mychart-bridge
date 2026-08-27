@@ -8,6 +8,7 @@ import { createServer as httpCreateServer, type IncomingMessage, type ServerResp
 import { randomUUID } from "node:crypto";
 import { loadInstances, bridgeApiKey, accountKey, type InstanceConfig } from "./config";
 import { ensureSchema, getClient, checkStatus, completeManual2Fa, beginManualLogin, closeAll } from "./manager";
+import { fetchSessionCsrfToken } from "../../openrecord/scrapers/myChart/core/csrf";
 
 const CAPABILITY_IDS = [
   "get_profile", "get_health_summary", "get_medications", "get_allergies", "get_health_issues",
@@ -91,8 +92,46 @@ server.tool(
     return { content: [{ type: "text", text: JSON.stringify({ account, ok }) }] };
   },
 );
-  return server;
-} // buildServer
+  server.tool(
+    "run_raw_endpoint",
+    "Authenticated arbitrary portal API call through a live MyChart session — the escape hatch for " +
+    "write flows not yet modeled as capabilities (bill pay, contact preferences, scheduling). " +
+    "Path is instance-relative, e.g. '/api/bill-pay/GetBillPayData'. " +
+    "CSRF token is auto-fetched and attached as __RequestVerificationToken. " +
+    "DISCLAIMER: POSTs with Save*/Pay*/Delete* MUTATE the account — pass a body only when you mean it.",
+    {
+      account: z.string().describe("Account: owner ('bill'/'lenna') or 'owner:hostname'"),
+      method: z.enum(["GET", "POST"]).describe("HTTP method"),
+      path: z.string().describe("Instance-relative path starting with /"),
+      body: z.record(z.unknown()).optional().describe("JSON body (auto-stringified)"),
+      needsCsrf: z.boolean().optional().describe("Attach __RequestVerificationToken (default true for POST)"),
+    },
+    async ({ account, method, path, body, needsCsrf }) => {
+      return withClient(account, async (_inst, client) => {
+        const isPost = method === "POST";
+        const headers: Record<string, string> = {};
+        let payload: string | undefined;
+        if (body !== undefined) {
+          payload = JSON.stringify(body);
+          headers["Content-Type"] = "application/json";
+        }
+        if (isPost && needsCsrf !== false) {
+          const csrf = await fetchSessionCsrfToken(client.request);
+          if (csrf) headers.__RequestVerificationToken = csrf;
+        }
+        const res = await client.request.makeRequest({ path, method, headers, body: payload });
+        const text = await res.text();
+        return {
+          content: [{
+            type: "text",
+            text: JSON.stringify({ status: res.status, url: res.url, body: text.slice(0, 100_000) }),
+          }],
+        };
+      });
+    },
+  );
+   return server;
+ } // buildServer
 
 // ---- HTTP wiring: bearer auth + fully stateless MCP (multi-machine safe) ----
 

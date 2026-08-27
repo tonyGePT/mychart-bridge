@@ -34,6 +34,7 @@ async function withClient(account: string, fn: (inst: InstanceConfig, client: Aw
   return fn(inst, client);
 }
 
+function buildServer(): McpServer {
 const server = new McpServer({ name: "mychart-bridge", version: "1.0.0" });
 
 server.tool(
@@ -91,6 +92,8 @@ server.tool(
   },
 );
 
+} // buildServer
+
 // ---- HTTP wiring: bearer auth + stateless streamable HTTP sessions ----
 
 const transports = new Map<string, StreamableHTTPServerTransport>();
@@ -119,7 +122,7 @@ async function handleMcp(req: IncomingMessage, res: ServerResponse): Promise<voi
       const sid = transport?.sessionId;
       if (sid) transports.delete(sid);
     };
-    await server.connect(transport);
+    await buildServer().connect(transport);
   }
   if (!transport) {
     res.writeHead(400).end(JSON.stringify({ error: "bad request" }));

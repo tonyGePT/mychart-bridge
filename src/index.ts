@@ -94,8 +94,7 @@ server.tool(
   return server;
 } // buildServer
 
-// ---- HTTP wiring: bearer auth + stateless streamable HTTP sessions ----
-const transports = new Map<string, StreamableHTTPServerTransport>();
+// ---- HTTP wiring: bearer auth + fully stateless MCP (multi-machine safe) ----
 
 async function handleMcp(req: IncomingMessage, res: ServerResponse): Promise<void> {
   const auth = req.headers.authorization ?? "";
@@ -104,30 +103,19 @@ async function handleMcp(req: IncomingMessage, res: ServerResponse): Promise<voi
     res.end(JSON.stringify({ error: "unauthorized" }));
     return;
   }
-  const sessionId = req.headers["mcp-session-id"] as string | undefined;
-  let transport: StreamableHTTPServerTransport | undefined;
-  if (sessionId) {
-    transport = transports.get(sessionId);
-    if (!transport) {
-      res.writeHead(404).end(JSON.stringify({ error: "unknown session" }));
-      return;
-    }
-  } else if (req.method === "POST") {
-    transport = new StreamableHTTPServerTransport({
-      sessionIdGenerator: () => randomUUID(),
-      onsessioninitialized: (sid) => { transports.set(sid, transport as StreamableHTTPServerTransport); },
-    });
-    transport.onclose = () => {
-      const sid = transport?.sessionId;
-      if (sid) transports.delete(sid);
-    };
-    await buildServer().connect(transport);
-  }
-  if (!transport) {
-    res.writeHead(400).end(JSON.stringify({ error: "bad request" }));
+  if (req.method !== "POST") {
+    // Stateless mode: no GET (SSE) or DELETE (session terminate) sessions exist.
+    res.writeHead(405).end(JSON.stringify({ error: "method not allowed; POST JSON-RPC only" }));
     return;
   }
-  await transport.handleRequest(req, res);
+  const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
+  try {
+    const server = buildServer();
+    await server.connect(transport);
+    await transport.handleRequest(req, res);
+  } finally {
+    await transport.close().catch(() => {});
+  }
 }
 
 export async function startServer(port: number): Promise<void> {

@@ -5,7 +5,6 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { z } from "zod";
 import { createServer as httpCreateServer, type IncomingMessage, type ServerResponse } from "node:http";
-import { randomUUID } from "node:crypto";
 import { loadInstances, bridgeApiKey, accountKey, type InstanceConfig } from "./config";
 import { ensureSchema, getClient, checkStatus, completeManual2Fa, beginManualLogin, closeAll } from "./manager";
 import { fetchSessionCsrfToken } from "../../openrecord/scrapers/myChart/core/csrf";
@@ -36,62 +35,39 @@ async function withClient(account: string, fn: (inst: InstanceConfig, client: Aw
 }
 
 function buildServer(): McpServer {
-const server = new McpServer({ name: "mychart-bridge", version: "1.0.0" });
+  const server = new McpServer({ name: "mychart-bridge", version: "1.0.0" });
 
-server.tool(
-  "list_accounts",
-  "List all configured MyChart accounts with connection status",
-  {},
-  async () => {
-    const statuses = await Promise.all(instances.map((i) => checkStatus(i)));
-    return { content: [{ type: "text", text: JSON.stringify(statuses, null, 1) }] };
-  },
-);
+  server.tool(
+    "list_accounts",
+    "List all configured MyChart accounts with connection status",
+    {},
+    async () => {
+      const statuses = await Promise.all(instances.map((i) => checkStatus(i)));
+      return { content: [{ type: "text", text: JSON.stringify(statuses, null, 1) }] };
+    },
+  );
 
-server.tool(
-  "run_capability",
-  "Run any openrecord capability against an account's live MyChart session. " +
-  "Capabilities: " + CAPABILITY_IDS.join(", ") + ". " +
-  "Arg shapes: send_message {subject,message,recipient?(provider display name),topic?}; send_reply {conversationId,message}; " +
-  "request_refill {medication_name}; get_note_content/get_message_thread/get_visit_notes need {csn} or {messageId} — see sibling list output.",
-  {
-    account: z.string().describe("Account: owner ('bill'/'lenna') or 'owner:hostname'"),
-    capability: z.string().describe("Capability id"),
-    args: z.record(z.unknown()).optional().describe("Capability arguments"),
-  },
-  async ({ account, capability, args }) => {
-    if (!CAPABILITY_IDS.includes(capability)) {
-      throw new Error(`unknown capability ${capability}; valid: ${CAPABILITY_IDS.join(", ")}`);
-    }
-    const result = await withClient(account, (_inst, client) =>
-      client.runCapability(capability, args ?? {}));
-    return { content: [{ type: "text", text: JSON.stringify(result, null, 1).slice(0, 100_000) }] };
-  },
-);
+  server.tool(
+    "run_capability",
+    "Run any openrecord capability against an account's live MyChart session. " +
+    "Capabilities: " + CAPABILITY_IDS.join(", ") + ". " +
+    "Arg shapes: send_message {subject,message,recipient?(provider display name),topic?}; send_reply {conversationId,message}; " +
+    "request_refill {medication_name}; get_note_content/get_message_thread/get_visit_notes need {csn} or {messageId} — see sibling list output.",
+    {
+      account: z.string().describe("Account: owner ('bill'/'lenna') or 'owner:hostname'"),
+      capability: z.string().describe("Capability id"),
+      args: z.record(z.unknown()).optional().describe("Capability arguments"),
+    },
+    async ({ account, capability, args }) => {
+      if (!CAPABILITY_IDS.includes(capability)) {
+        throw new Error(`unknown capability ${capability}; valid: ${CAPABILITY_IDS.join(", ")}`);
+      }
+      const result = await withClient(account, (_inst, client) =>
+        client.runCapability(capability, args ?? {}));
+      return { content: [{ type: "text", text: JSON.stringify(result, null, 1).slice(0, 100_000) }] };
+    },
+  );
 
-server.tool(
-  "begin_login",
-  "Kick off a manual password login for an account without an autonomous 2FA path. Returns need_2fa; then call complete_2fa with the code.",
-  { account: z.string() },
-  async ({ account }) => {
-    const inst = byAccount.get(account);
-    if (!inst) throw new Error(`unknown account: ${account}`);
-    const state = await beginManualLogin(inst);
-    return { content: [{ type: "text", text: JSON.stringify({ account, state }) }] };
-  },
-);
-
-server.tool(
-  "complete_2fa",
-  "Complete a pending 2FA challenge with a human-provided code",
-  { account: z.string(), code: z.string().describe("6-digit code") },
-  async ({ account, code }) => {
-    const inst = byAccount.get(account);
-    if (!inst) throw new Error(`unknown account: ${account}`);
-    const ok = await completeManual2Fa(inst, code);
-    return { content: [{ type: "text", text: JSON.stringify({ account, ok }) }] };
-  },
-);
   server.tool(
     "run_raw_endpoint",
     "Authenticated arbitrary portal API call through a live MyChart session — the escape hatch for " +
@@ -130,8 +106,33 @@ server.tool(
       });
     },
   );
-   return server;
- } // buildServer
+
+  server.tool(
+    "begin_login",
+    "Kick off a manual password login for an account without an autonomous 2FA path. Returns need_2fa; then call complete_2fa with the code.",
+    { account: z.string() },
+    async ({ account }) => {
+      const inst = byAccount.get(account);
+      if (!inst) throw new Error(`unknown account: ${account}`);
+      const state = await beginManualLogin(inst);
+      return { content: [{ type: "text", text: JSON.stringify({ account, state }) }] };
+    },
+  );
+
+  server.tool(
+    "complete_2fa",
+    "Complete a pending 2FA challenge with a human-provided code",
+    { account: z.string(), code: z.string().describe("6-digit code") },
+    async ({ account, code }) => {
+      const inst = byAccount.get(account);
+      if (!inst) throw new Error(`unknown account: ${account}`);
+      const ok = await completeManual2Fa(inst, code);
+      return { content: [{ type: "text", text: JSON.stringify({ account, ok }) }] };
+    },
+  );
+
+  return server;
+}
 
 // ---- HTTP wiring: bearer auth + fully stateless MCP (multi-machine safe) ----
 
@@ -148,6 +149,7 @@ async function handleMcp(req: IncomingMessage, res: ServerResponse): Promise<voi
     return;
   }
   const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
+  transport.onerror = (e) => console.error("[transport error]", e);
   try {
     const server = buildServer();
     await server.connect(transport);

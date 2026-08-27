@@ -9,6 +9,10 @@ import { loadInstances, accountKey, type InstanceConfig } from "./config";
 import { ensureSchema, getClient, checkStatus, completeManual2Fa, beginManualLogin, closeAll } from "./manager";
 import { fetchSessionCsrfToken } from "../../openrecord/scrapers/myChart/core/csrf";
 import { makeDispatcher, type ToolDef } from "./jsonrpc";
+import {
+  ensureOAuthSchema, isAuthorized, protectedResourceMetadata, authorizationServerMetadata,
+  handleRegister, handleAuthorize, handleToken, ISSUER,
+} from "./oauth";
 
 const CAPABILITY_IDS = [
   "get_profile", "get_health_summary", "get_medications", "get_allergies", "get_health_issues",
@@ -253,33 +257,100 @@ const tools: ToolDef[] = [
 
 export async function startServer(port: number): Promise<void> {
   await ensureSchema();
+  await ensureOAuthSchema();
   const handle = makeDispatcher(tools);
   const httpServer = httpCreateServer(async (req, res) => {
-    if (req.url?.startsWith("/mcp")) {
-      let body = "";
-      req.on("data", (c: Buffer) => { body += c.toString(); });
-      req.on("end", async () => {
-        try {
-          await handle(req, res, body);
-        } catch (err) {
-          console.error("mcp error", err);
-          if (!res.headersSent) {
-            res.writeHead(500, { "Content-Type": "application/json" });
-            res.end(JSON.stringify({ error: String(err) }));
-          }
+    const url = new URL(req.url ?? "/", `http://${req.headers.host ?? "localhost"}`);
+    try {
+      if (url.pathname === "/healthz") {
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ ok: true, accounts: instances.map((i) => accountKey(i)) }));
+        return;
+      }
+      if (url.pathname === "/.well-known/oauth-protected-resource" || url.pathname === "/.well-known/oauth-protected-resource/mcp") {
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify(await protectedResourceMetadata().json()));
+        return;
+      }
+      if (url.pathname === "/.well-known/oauth-authorization-server") {
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify(await authorizationServerMetadata().json()));
+        return;
+      }
+      if (url.pathname === "/register" && req.method === "POST") {
+        const out = await handleRegister(new Request(ISSUER + "/register", { method: "POST", body: await readBody(req) }));
+        res.writeHead(out.status, { "Content-Type": "application/json" });
+        res.end(await out.text());
+        return;
+      }
+      if (url.pathname === "/authorize") {
+        const method = req.method ?? "GET";
+        const bodyText = method === "POST" ? await readBody(req) : "";
+        const target = new URL(ISSUER + "/authorize" + (method === "GET" ? (url.search || "") : ""));
+        const out = await handleAuthorize(new Request(target, {
+          method,
+          ...(method === "POST" ? { body: bodyText, headers: { "Content-Type": "application/x-www-form-urlencoded" } } : {}),
+        }));
+        const loc = out.headers.get("location");
+        if (loc) { res.writeHead(302, { Location: loc }); res.end(); return; }
+        res.writeHead(out.status, { "Content-Type": out.headers.get("content-type") ?? "text/html" });
+        res.end(await out.text());
+        return;
+      }
+      if (url.pathname === "/token" && req.method === "POST") {
+        const out = await handleToken(new Request(ISSUER + "/token", {
+          method: "POST",
+          body: await readBody(req),
+          headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        }));
+        res.writeHead(out.status, { "Content-Type": "application/json" });
+        res.end(await out.text());
+        return;
+      }
+      if (url.pathname.startsWith("/mcp")) {
+        const ok = await isAuthorized(new Request(ISSUER + url.pathname + url.search, {
+          method: req.method,
+          headers: req.headers as unknown as HeadersInit,
+        }));
+        if (!ok) {
+          res.writeHead(401, {
+            "Content-Type": "application/json",
+            "WWW-Authenticate": `Bearer resource_metadata="${ISSUER}/.well-known/oauth-protected-resource"`,
+          });
+          res.end(JSON.stringify({ error: "unauthorized" }));
+          return;
         }
-      });
-      return;
+        let body = "";
+        req.on("data", (c: Buffer) => { body += c.toString(); });
+        req.on("end", async () => {
+          try {
+            await handle(req, res, body);
+          } catch (err) {
+            console.error("mcp error", err);
+            if (!res.headersSent) {
+              res.writeHead(500, { "Content-Type": "application/json" });
+              res.end(JSON.stringify({ error: String(err) }));
+            }
+          }
+        });
+        return;
+      }
+      res.writeHead(404).end();
+    } catch (err) {
+      console.error("server error", err);
+      if (!res.headersSent) res.writeHead(500).end(JSON.stringify({ error: String(err) }));
     }
-    if (req.url?.startsWith("/healthz")) {
-      res.writeHead(200, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({ ok: true, accounts: instances.map((i) => accountKey(i)) }));
-      return;
-    }
-    res.writeHead(404).end();
   });
   await new Promise<void>((resolve) => httpServer.listen(port, () => resolve()));
   console.log(`mychart-bridge listening on :${port} (accounts: ${instances.map((i) => accountKey(i)).join(", ")})`);
+}
+
+function readBody(req: import("node:http").IncomingMessage): Promise<string> {
+  return new Promise((resolve) => {
+    let body = "";
+    req.on("data", (c: Buffer) => { body += c.toString(); });
+    req.on("end", () => resolve(body));
+  });
 }
 
 process.on("SIGTERM", async () => { await closeAll(); process.exit(0); });

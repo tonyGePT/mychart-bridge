@@ -141,6 +141,111 @@ const tools: ToolDef[] = [
       return { account: args.account, ok };
     },
   },
+  {
+    name: "care_team_real",
+    description: "Care team / provider list with Relation (PCP/specialist), Specialty, and CanMessage flag. " +
+      "Uses POST /Clinical/CareTeam/Load (shape captured live 2026-08-27). Also returns LoadExternal providers.",
+    inputSchema: {
+      type: "object",
+      properties: { account: { type: "string", description: "Account: owner or 'owner:hostname'" } },
+      required: ["account"],
+    },
+    run: async (args) => withClient(args.account as string, async (_inst, client) => {
+      const load = await client.request.makeRequest({ path: "/Clinical/CareTeam/Load", method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" });
+      const loadJson = await load.json().catch(() => null);
+      const ext = await client.request.makeRequest({ path: "/Clinical/CareTeam/LoadExternal", method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" });
+      const extJson = await ext.json().catch(() => null);
+      return {
+        providers: loadJson?.ProvidersList ?? [],
+        externalProviders: extJson?.ProvidersList ?? [],
+      };
+    }),
+  },
+  {
+    name: "test_result_details",
+    description: "Full detail of one test result (per-component results, reference ranges, comments). " +
+      "Get orderKey from run_capability get_lab_results output.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        account: { type: "string", description: "Account: owner or 'owner:hostname'" },
+        orderKey: { type: "string", description: "Result orderKey from get_lab_results" },
+      },
+      required: ["account", "orderKey"],
+    },
+    run: async (args) => withClient(args.account as string, async (_inst, client) => {
+      const csrf = await fetchSessionCsrfToken(client.request);
+      const headers: Record<string, string> = { "Content-Type": "application/json" };
+      if (csrf) headers.__RequestVerificationToken = csrf;
+      const res = await client.request.makeRequest({
+        path: "/api/test-results/GetDetails", method: "POST", headers,
+        body: JSON.stringify({ orderKey: args.orderKey, organizationID: "", PageNonce: "" }),
+      });
+      return res.json().catch(() => null);
+    }),
+  },
+  {
+    name: "medication_history",
+    description: "Full medication history (all-time, incl. external/linked-org meds), not just the active list. " +
+      "filter: 'all' | 'active' | 'asNeeded' etc. — 'all' returns complete history.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        account: { type: "string", description: "Account: owner or 'owner:hostname'" },
+        filter: { type: "string", description: "Page filter, default 'all'" },
+      },
+      required: ["account"],
+    },
+    run: async (args) => withClient(args.account as string, async (_inst, client) => {
+      const csrf = await fetchSessionCsrfToken(client.request);
+      const headers: Record<string, string> = { "Content-Type": "application/json" };
+      if (csrf) headers.__RequestVerificationToken = csrf;
+      const res = await client.request.makeRequest({
+        path: "/api/medications/LoadMedicationsPage", method: "POST", headers,
+        body: JSON.stringify({ filter: (args.filter as string) ?? "all" }),
+      });
+      return res.json().catch(() => null);
+    }),
+  },
+  {
+    name: "send_message_many",
+    description: "Send the same message to one or many providers. recipients[] items: " +
+      "{recipientType, displayName, specialty, userId, departmentId, poolId, providerId, organizationId} — " +
+      "get them from run_capability get_message_recipients. topic: {displayName, value} from get_message_topics.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        account: { type: "string", description: "Account: owner or 'owner:hostname'" },
+        recipients: {
+          type: "array",
+          description: "One or many recipient structs (from get_message_recipients)",
+          items: { type: "object", additionalProperties: true },
+        },
+        topic: { type: "object", description: "{displayName, value} from get_message_topics", additionalProperties: true },
+        subject: { type: "string", description: "Message subject" },
+        message: { type: "string", description: "Message body" },
+      },
+      required: ["account", "recipients", "topic", "subject", "message"],
+    },
+    run: async (args) => withClient(args.account as string, async (_inst, client) => {
+      const recipients = args.recipients as Record<string, unknown>[];
+      const topic = args.topic as Record<string, unknown>;
+      const results = [];
+      for (const recipient of recipients) {
+        try {
+          const r = await client.runCapability("send_message", {
+            recipient, topic,
+            subject: args.subject as string,
+            message: args.message as string,
+          });
+          results.push({ recipient: (recipient as { displayName?: string }).displayName, ok: true, result: r });
+        } catch (err) {
+          results.push({ recipient: (recipient as { displayName?: string }).displayName, ok: false, error: String(err).slice(0, 200) });
+        }
+      }
+      return { sent: results.filter((x) => x.ok).length, failed: results.filter((x) => !x.ok).length, results };
+    }),
+  },
 ];
 
 export async function startServer(port: number): Promise<void> {

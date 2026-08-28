@@ -3,7 +3,7 @@
 // GMAIL_* credentials enable fully-automatic email 2FA (Providence).
 
 export interface InstanceConfig {
-  owner: string;           // "bill" | "lenna"
+  owner: string;           // "dad" | "mom"
   hostname: string;
   username: string;
   password: string;

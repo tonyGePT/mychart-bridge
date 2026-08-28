@@ -141,6 +141,8 @@ async function llm(prompt: string, system: string): Promise<string | null> {
 async function postNotes(notes: DigestNote[]): Promise<void> {
   const url = process.env.DISCORD_WEBHOOK_URL;
   if (!url || notes.length === 0) return;
+  const mention = process.env.DISCORD_MENTION_USER_ID;
+  const mentionable = notes.some((n) => n.kind !== "info");
   for (const batch of chunk(notes, 10)) {
     try {
       const res = await fetch(url, {
@@ -152,6 +154,9 @@ async function postNotes(notes: DigestNote[]): Promise<void> {
         },
         body: JSON.stringify({
           username: "MyChart Digest",
+          ...(mention && mentionable
+            ? { content: `<@${mention}> ${notes.length} new MyChart update${notes.length === 1 ? "" : "s"}` }
+            : {}),
           embeds: batch.map((n) => ({
             title: n.title.slice(0, 256),
             description: n.desc.slice(0, 3900) || undefined,
@@ -486,16 +491,40 @@ export function startWatcher(): void {
     console.log("[digest] DISCORD_WEBHOOK_URL not set — watcher disabled");
     return;
   }
+  const poll = (label: string) =>
+    pollAllOnce(true)
+      .then((r) => console.log(`[digest] ${label}: ${r.notes.length} notes, ${r.errors.length} errors`))
+      .catch((e) => console.error(`[digest] ${label} failed`, e));
+
+  // Catch-up/seed poll at boot; dedupe state makes this safe after redeploys.
+  setTimeout(() => poll("boot poll"), 15_000);
+
+  const times = (process.env.WATCH_TIMES ?? "")
+    .split(",").map((s) => s.trim()).filter((s) => /^\d{1,2}:\d{2}$/.test(s));
+  if (times.length > 0) {
+    console.log(`[digest] schedule ${times.join(" & ")} (${process.env.TZ ?? "UTC"})`);
+    const loop = () => {
+      poll("scheduled poll").finally(() => setTimeout(loop, nextRunDelayMs(times)));
+    };
+    setTimeout(loop, nextRunDelayMs(times));
+    return;
+  }
+
   const mins = Math.max(5, Number(process.env.WATCH_INTERVAL_MIN ?? 20) || 20);
   console.log(`[digest] watcher enabled, interval ${mins}m`);
-  setTimeout(() => {
-    pollAllOnce(true)
-      .then((r) => console.log(`[digest] initial poll: ${r.notes.length} notes, ${r.errors.length} errors`))
-      .catch((e) => console.error("[digest] initial poll failed", e));
-  }, 15_000);
-  setInterval(() => {
-    pollAllOnce(true)
-      .then((r) => { if (r.notes.length || r.errors.length) console.log(`[digest] poll: ${r.notes.length} notes, ${r.errors.length} errors`); })
-      .catch((e) => console.error("[digest] poll failed", e));
-  }, mins * 60_000);
+  setInterval(() => poll("interval poll"), mins * 60_000);
+}
+
+/** Milliseconds until the next occurrence of any HH:MM (local TZ). */
+function nextRunDelayMs(times: string[]): number {
+  const now = new Date();
+  let best = Infinity;
+  for (const t of times) {
+    const [h, m] = t.split(":").map(Number);
+    const d = new Date(now);
+    d.setHours(h, m, 0, 0);
+    if (d.getTime() <= now.getTime()) d.setDate(d.getDate() + 1);
+    best = Math.min(best, d.getTime() - now.getTime());
+  }
+  return Math.max(best, 5_000);
 }

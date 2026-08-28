@@ -60,7 +60,7 @@ const tools: ToolDef[] = [
     inputSchema: {
       type: "object",
       properties: {
-        account: { type: "string", description: "Account: owner ('bill'/'lenna') or 'owner:hostname'" },
+        account: { type: "string", description: "Account: owner ('dad'/'mom') or 'owner:hostname'" },
         capability: { type: "string", description: "Capability id" },
         args: { type: "object", description: "Capability arguments", additionalProperties: true },
       },
@@ -85,7 +85,7 @@ const tools: ToolDef[] = [
     inputSchema: {
       type: "object",
       properties: {
-        account: { type: "string", description: "Account: owner ('bill'/'lenna') or 'owner:hostname'" },
+        account: { type: "string", description: "Account: owner ('dad'/'mom') or 'owner:hostname'" },
         method: { type: "string", enum: ["GET", "POST"], description: "HTTP method" },
         path: { type: "string", description: "Instance-relative path starting with /" },
         body: { type: "object", description: "JSON body (auto-stringified)", additionalProperties: true },

@@ -65,36 +65,6 @@ export async function deleteMessage(
 }
 
 /**
- * Best-effort cleanup: delete code emails from the 2FA sender older than
- * 10 minutes. Dead one-time codes have no value, and stale emails would
- * otherwise accumulate in the inbox forever.
- */
-async function purgeStale(
-  g: { clientId: string; clientSecret: string; refreshToken: string; fromFilter: string },
-): Promise<void> {
-  try {
-    const tok = await accessToken(g.clientId, g.clientSecret, g.refreshToken);
-    const cutoff = Date.now() - 10 * 60_000;
-    const res = await fetch(
-      `https://gmail.googleapis.com/gmail/v1/users/me/messages?maxResults=25&q=${encodeURIComponent(`from:(${g.fromFilter})`)}`,
-      { headers: { Authorization: `Bearer ${tok}` } },
-    );
-    if (!res.ok) return;
-    const list = (await res.json()) as { messages?: { id: string }[] };
-    for (const m of list.messages ?? []) {
-      const full = await fetch(`https://gmail.googleapis.com/gmail/v1/users/me/messages/${m.id}?format=full`, {
-        headers: { Authorization: `Bearer ${tok}` },
-      });
-      if (!full.ok) continue;
-      const j = (await full.json()) as { internalDate?: string };
-      if (Number(j.internalDate ?? 0) < cutoff) await deleteMessage(g, m.id);
-    }
-  } catch (e) {
-    console.error("[gmail] stale purge error", e);
-  }
-}
-
-/**
  * Wait for a fresh 6-digit code from the given sender, sent after `sinceMs`.
  * Polls Gmail every 3s for up to timeoutMs.
  */
@@ -107,7 +77,6 @@ export async function fetchTwoFaCode(
   const headers = { Authorization: `Bearer ${tok}` };
   const after = new Date(sinceMs - 60_000).toISOString().slice(0, 10).replace(/-/g, "/");
   const q = `from:(${g.fromFilter}) after:${after}`;
-  void purgeStale(g);
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     const listRes = await fetch(

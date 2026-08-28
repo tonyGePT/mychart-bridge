@@ -38,6 +38,63 @@ function extractBody(payload: { mimeType?: string; body?: { data?: string }; par
 }
 
 /**
+ * Delete a Gmail message by id. Used to purge consumed 2FA code emails —
+ * one-time codes must not linger in the inbox. Never fatal: by the time this
+ * runs the code is already extracted, so failures are logged and dropped.
+ */
+export async function deleteMessage(
+  g: { clientId: string; clientSecret: string; refreshToken: string },
+  id: string,
+): Promise<boolean> {
+  try {
+    const tok = await accessToken(g.clientId, g.clientSecret, g.refreshToken);
+    const res = await fetch(`https://gmail.googleapis.com/gmail/v1/users/me/messages/${id}`, {
+      method: "DELETE",
+      headers: { Authorization: `Bearer ${tok}` },
+    });
+    if (!res.ok) {
+      console.error("[gmail] delete failed", res.status, (await res.text()).slice(0, 150));
+      return false;
+    }
+    console.log("[gmail] deleted 2fa email", id);
+    return true;
+  } catch (e) {
+    console.error("[gmail] delete error", e);
+    return false;
+  }
+}
+
+/**
+ * Best-effort cleanup: delete code emails from the 2FA sender older than
+ * 10 minutes. Dead one-time codes have no value, and stale emails would
+ * otherwise accumulate in the inbox forever.
+ */
+async function purgeStale(
+  g: { clientId: string; clientSecret: string; refreshToken: string; fromFilter: string },
+): Promise<void> {
+  try {
+    const tok = await accessToken(g.clientId, g.clientSecret, g.refreshToken);
+    const cutoff = Date.now() - 10 * 60_000;
+    const res = await fetch(
+      `https://gmail.googleapis.com/gmail/v1/users/me/messages?maxResults=25&q=${encodeURIComponent(`from:(${g.fromFilter})`)}`,
+      { headers: { Authorization: `Bearer ${tok}` } },
+    );
+    if (!res.ok) return;
+    const list = (await res.json()) as { messages?: { id: string }[] };
+    for (const m of list.messages ?? []) {
+      const full = await fetch(`https://gmail.googleapis.com/gmail/v1/users/me/messages/${m.id}?format=full`, {
+        headers: { Authorization: `Bearer ${tok}` },
+      });
+      if (!full.ok) continue;
+      const j = (await full.json()) as { internalDate?: string };
+      if (Number(j.internalDate ?? 0) < cutoff) await deleteMessage(g, m.id);
+    }
+  } catch (e) {
+    console.error("[gmail] stale purge error", e);
+  }
+}
+
+/**
  * Wait for a fresh 6-digit code from the given sender, sent after `sinceMs`.
  * Polls Gmail every 3s for up to timeoutMs.
  */
@@ -50,6 +107,7 @@ export async function fetchTwoFaCode(
   const headers = { Authorization: `Bearer ${tok}` };
   const after = new Date(sinceMs - 60_000).toISOString().slice(0, 10).replace(/-/g, "/");
   const q = `from:(${g.fromFilter}) after:${after}`;
+  void purgeStale(g);
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     const listRes = await fetch(
@@ -70,12 +128,12 @@ export async function fetchTwoFaCode(
           if (sentAt >= sinceMs - 60_000) {
             const body = extractBody(msg.payload ?? {});
             const m = body.match(/\b(\d{6})\b/);
-            if (m) return m[1];
+            if (m) { void deleteMessage(g, id); return m[1]; }
             // fall back to snippet-style subject scan
             const subj = (msg.payload as unknown as { headers?: { name: string; value: string }[] })?.headers
               ?.find((h) => h.name.toLowerCase() === "subject")?.value ?? "";
             const sm = subj.match(/\b(\d{6})\b/);
-            if (sm) return sm[1];
+            if (sm) { void deleteMessage(g, id); return sm[1]; }
           }
         }
       }

@@ -5,3 +5,6 @@ node_modules/
 gmail-creds.json
 DEPLOY_FLY_TOKEN.txt
 DEPLOY_KEY.txt
+OPENROUTER_KEY.txt
+DISCORD_WEBHOOK.txt
+deploy-watcher.log

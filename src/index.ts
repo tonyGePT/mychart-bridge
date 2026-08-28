@@ -13,7 +13,7 @@ import {
   ensureOAuthSchema, isAuthorized, protectedResourceMetadata, authorizationServerMetadata,
   handleRegister, handleAuthorize, handleToken, ISSUER,
 } from "./oauth";
-
+import { startWatcher, pollAllOnce } from "./digest";
 const CAPABILITY_IDS = [
   "get_profile", "get_health_summary", "get_medications", "get_allergies", "get_health_issues",
   "get_vitals", "get_immunizations", "get_preventive_care", "get_medical_history", "get_goals",
@@ -253,6 +253,17 @@ const tools: ToolDef[] = [
       return { sent: results.filter((x) => x.ok).length, failed: results.filter((x) => !x.ok).length, results };
     }),
   },
+  {
+    name: "run_digest_now",
+    description: "Run one family digest poll immediately: read all five portal accounts for new unread messages, " +
+      "appointment changes, completed-visit summaries, new lab/imaging results, and billing changes; post new " +
+      "items to the family Discord digest channel. Read-only — never sends portal messages or mutates anything.",
+    inputSchema: { type: "object", properties: {}, additionalProperties: false },
+    run: async () => {
+      const r = await pollAllOnce(true);
+      return { posted: r.notes.length, errors: r.errors, notes: r.notes.map((n) => ({ kind: n.kind, title: n.title })) };
+    },
+  },
 ];
 
 export async function startServer(port: number): Promise<void> {
@@ -334,6 +345,7 @@ export async function startServer(port: number): Promise<void> {
   });
   await new Promise<void>((resolve) => httpServer.listen(port, () => resolve()));
   console.log(`mychart-bridge listening on :${port} (accounts: ${instances.map((i) => accountKey(i)).join(", ")})`);
+  startWatcher();
 }
 
 function readBody(req: import("node:http").IncomingMessage): Promise<string> {

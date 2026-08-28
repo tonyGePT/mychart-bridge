@@ -223,8 +223,12 @@ const manualPending = new Map<string, MyChartRequest>();
 /** Kick off a password login that stops at the 2FA challenge (for manual completion). */
 export async function beginManualLogin(inst: InstanceConfig): Promise<"need_2fa" | "logged_in"> {
   const account = accountKey(inst);
+  // When gmail creds exist, skip the portal's default send (engine retry order
+  // hits SMS first on instances that hide their delivery buttons) and force
+  // email ourselves. Without gmail, let the portal send via its default.
   const login = await myChartUserPassLogin({
-    hostname: inst.hostname, user: inst.username, pass: inst.password, skipSendCode: false,
+    hostname: inst.hostname, user: inst.username, pass: inst.password,
+    skipSendCode: !!inst.gmail,
   });
   if (login.state === "logged_in") {
     const client = await MyChartClient.fromSerialized(await login.mychartRequest.serialize(), { keepalive: false });
@@ -235,6 +239,11 @@ export async function beginManualLogin(inst: InstanceConfig): Promise<"need_2fa"
     }
   }
   if (login.state === "need_2fa") {
+    if (inst.gmail) {
+      const sent = await sendEmailCode(login.mychartRequest);
+      if (!sent) throw new Error(`[${account}] could not force email code send; no code was delivered`);
+      console.error(`[${account}] forced email SendCode ok (manual login)`);
+    }
     manualPending.set(account, login.mychartRequest);
     return "need_2fa";
   }

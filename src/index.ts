@@ -72,7 +72,17 @@ const tools: ToolDef[] = [
         throw new Error(`unknown capability ${capability}; valid: ${CAPABILITY_IDS.join(", ")}`);
       }
       const capArgs = (args.args ?? {}) as Record<string, unknown>;
-      return withClient(account, (_inst, client) => client.runCapability(capability, capArgs));
+      const result = await withClient(account, (_inst, client) => client.runCapability(capability, capArgs));
+      // Some Epic instances answer SendMedicalAdviceRequest with HTTP 200 and
+      // an empty conversation id when they silently drop the request (measured
+      // on myhealthchart.com: bodies over 500 chars). Never report success
+      // without a durable id — downstream callers key off this.
+      if (capability === "send_message"
+          && typeof result === "object" && result !== null && "success" in result
+          && result.success === true && !("conversationId" in result && result.conversationId)) {
+        return { ...result, success: false, error: "indeterminate: portal accepted request but returned no conversation id; message may not exist — verify in Sent before retrying" };
+      }
+      return result;
     },
   },
   {
@@ -117,7 +127,7 @@ const tools: ToolDef[] = [
   },
   {
     name: "begin_login",
-    description: "Kick off a manual password login for an account without an autonomous 2FA path. Returns need_2fa; then call complete_2fa with the code.",
+    description: "Kick off a manual password login. Triggers a 2FA code delivery: email if the account has gmail creds configured, otherwise the portal's default (usually SMS to the patient's phone — do not use casually). Returns need_2fa; then call complete_2fa with the code. Prefer exercising a read capability first — accounts with a passkey/TOTP/gmail path log in autonomously without a human code.",
     inputSchema: {
       type: "object",
       properties: { account: { type: "string" } },
@@ -235,19 +245,50 @@ const tools: ToolDef[] = [
       required: ["account", "recipients", "topic", "subject", "message"],
     },
     run: async (args) => withClient(args.account as string, async (_inst, client) => {
-      const recipients = args.recipients as Record<string, unknown>[];
-      const topic = args.topic as Record<string, unknown>;
-      const results = [];
-      for (const recipient of recipients) {
+      // runCapability returns untyped JSON; narrow at this boundary.
+      function parseSendResult(raw: unknown): { success: boolean; conversationId?: string; error?: string } {
+        if (typeof raw !== "object" || raw === null || !("success" in raw)) {
+          return { success: false, error: `unexpected send_message result: ${String(raw).slice(0, 500)}` };
+        }
+        const r = raw as Record<string, unknown>; // shape checked above, only keyed reads
+        const out: { success: boolean; conversationId?: string; error?: string } = { success: r.success === true };
+        if (typeof r.conversationId === "string") out.conversationId = r.conversationId;
+        if (typeof r.error === "string") out.error = r.error;
+        return out;
+      }
+      const recipients = Array.isArray(args.recipients) ? args.recipients : [];
+      const topicArg = typeof args.topic === "object" && args.topic !== null && "displayName" in args.topic
+        ? args.topic.displayName
+        : args.topic;
+      const topicName = typeof topicArg === "string" ? topicArg : undefined;
+      const results: Array<{ recipient?: string; ok: boolean; conversationId?: string; error?: string }> = [];
+      for (const entry of recipients) {
+        const recipient = typeof entry === "object" && entry !== null && "displayName" in entry
+          ? entry.displayName
+          : undefined;
+        const name = typeof recipient === "string" ? recipient : undefined;
+        if (!name) {
+          results.push({ ok: false, error: "recipient missing displayName" });
+          continue;
+        }
         try {
-          const r = await client.runCapability("send_message", {
-            recipient, topic,
-            subject: args.subject as string,
-            message: args.message as string,
-          });
-          results.push({ recipient: (recipient as { displayName?: string }).displayName, ok: true, result: r });
+          // openrecord's send_message takes a top-level recipient_name string
+          // and resolves the recipient itself against get_message_recipients —
+          // it never accepts a recipient object.
+          const r = parseSendResult(await client.runCapability("send_message", {
+            recipient_name: name,
+            ...(topicName !== undefined ? { topic: topicName } : {}),
+            subject: args.subject,
+            message: args.message,
+          }));
+          if (!r.success) throw new Error(r.error ?? "send_message returned no success flag");
+          if (!r.conversationId) {
+            results.push({ recipient: name, ok: false, error: "indeterminate: portal accepted request but returned no conversation id; message may not exist — verify in Sent before retrying" });
+            continue;
+          }
+          results.push({ recipient: name, ok: true, conversationId: r.conversationId });
         } catch (err) {
-          results.push({ recipient: (recipient as { displayName?: string }).displayName, ok: false, error: String(err).slice(0, 200) });
+          results.push({ recipient: name, ok: false, error: String(err) });
         }
       }
       return { sent: results.filter((x) => x.ok).length, failed: results.filter((x) => !x.ok).length, results };

@@ -14,6 +14,7 @@ import {
   handleRegister, handleAuthorize, handleToken, ISSUER,
 } from "./oauth";
 import { startWatcher, pollAllOnce } from "./digest";
+import { sendMessageInThread } from "./sendThread";
 const CAPABILITY_IDS = [
   "get_profile", "get_health_summary", "get_medications", "get_allergies", "get_health_issues",
   "get_vitals", "get_immunizations", "get_preventive_care", "get_medical_history", "get_goals",
@@ -55,7 +56,7 @@ const tools: ToolDef[] = [
     description:
       "Run any openrecord capability against an account's live MyChart session. " +
       "Capabilities: " + CAPABILITY_IDS.join(", ") + ". " +
-      "Arg shapes: send_message {subject,message,recipient?(provider display name),topic?}; send_reply {conversationId,message}; " +
+      "Arg shapes: send_message {recipient_name, subject, message, topic?} — long messages are auto-chunked into one conversation; send_reply {conversationId,message}; " +
       "request_refill {medication_name}.",
     inputSchema: {
       type: "object",
@@ -72,17 +73,18 @@ const tools: ToolDef[] = [
         throw new Error(`unknown capability ${capability}; valid: ${CAPABILITY_IDS.join(", ")}`);
       }
       const capArgs = (args.args ?? {}) as Record<string, unknown>;
-      const result = await withClient(account, (_inst, client) => client.runCapability(capability, capArgs));
-      // Some Epic instances answer SendMedicalAdviceRequest with HTTP 200 and
-      // an empty conversation id when they silently drop the request (measured
-      // on myhealthchart.com: bodies over 500 chars). Never report success
-      // without a durable id — downstream callers key off this.
-      if (capability === "send_message"
-          && typeof result === "object" && result !== null && "success" in result
-          && result.success === true && !("conversationId" in result && result.conversationId)) {
-        return { ...result, success: false, error: "indeterminate: portal accepted request but returned no conversation id; message may not exist — verify in Sent before retrying" };
+      // send_message goes through the thread sender: the portal silently
+      // drops bodies over 500 chars, so long messages are chunked into one
+      // conversation (send_message + send_reply) and confirmed by read-back.
+      if (capability === "send_message") {
+        return withClient(account, (_inst, client) => sendMessageInThread(client, {
+          recipientName: typeof capArgs.recipient_name === "string" ? capArgs.recipient_name : undefined,
+          topic: typeof capArgs.topic === "string" ? capArgs.topic : undefined,
+          subject: typeof capArgs.subject === "string" ? capArgs.subject : "",
+          message: typeof capArgs.message === "string" ? capArgs.message : "",
+        }));
       }
-      return result;
+      return withClient(account, (_inst, client) => client.runCapability(capability, capArgs));
     },
   },
   {
@@ -245,23 +247,12 @@ const tools: ToolDef[] = [
       required: ["account", "recipients", "topic", "subject", "message"],
     },
     run: async (args) => withClient(args.account as string, async (_inst, client) => {
-      // runCapability returns untyped JSON; narrow at this boundary.
-      function parseSendResult(raw: unknown): { success: boolean; conversationId?: string; error?: string } {
-        if (typeof raw !== "object" || raw === null || !("success" in raw)) {
-          return { success: false, error: `unexpected send_message result: ${String(raw).slice(0, 500)}` };
-        }
-        const r = raw as Record<string, unknown>; // shape checked above, only keyed reads
-        const out: { success: boolean; conversationId?: string; error?: string } = { success: r.success === true };
-        if (typeof r.conversationId === "string") out.conversationId = r.conversationId;
-        if (typeof r.error === "string") out.error = r.error;
-        return out;
-      }
       const recipients = Array.isArray(args.recipients) ? args.recipients : [];
       const topicArg = typeof args.topic === "object" && args.topic !== null && "displayName" in args.topic
         ? args.topic.displayName
         : args.topic;
       const topicName = typeof topicArg === "string" ? topicArg : undefined;
-      const results: Array<{ recipient?: string; ok: boolean; conversationId?: string; error?: string }> = [];
+      const results: Array<{ recipient?: string; ok: boolean; conversationId?: string; parts?: number; confirmed?: boolean; error?: string }> = [];
       for (const entry of recipients) {
         const recipient = typeof entry === "object" && entry !== null && "displayName" in entry
           ? entry.displayName
@@ -274,19 +265,14 @@ const tools: ToolDef[] = [
         try {
           // openrecord's send_message takes a top-level recipient_name string
           // and resolves the recipient itself against get_message_recipients —
-          // it never accepts a recipient object.
-          const r = parseSendResult(await client.runCapability("send_message", {
-            recipient_name: name,
-            ...(topicName !== undefined ? { topic: topicName } : {}),
+          // it never accepts a recipient object. Long messages are chunked
+          // into one thread (portal drops bodies over 500 chars silently).
+          results.push({ recipient: name, ...(await sendMessageInThread(client, {
+            recipientName: name,
+            topic: topicName,
             subject: args.subject,
             message: args.message,
-          }));
-          if (!r.success) throw new Error(r.error ?? "send_message returned no success flag");
-          if (!r.conversationId) {
-            results.push({ recipient: name, ok: false, error: "indeterminate: portal accepted request but returned no conversation id; message may not exist — verify in Sent before retrying" });
-            continue;
-          }
-          results.push({ recipient: name, ok: true, conversationId: r.conversationId });
+          })) });
         } catch (err) {
           results.push({ recipient: name, ok: false, error: String(err) });
         }

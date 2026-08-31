@@ -90,7 +90,16 @@ export async function ensureDigestSchema(): Promise<void> {
   )`;
 }
 
-type SeenRow = { item_id: string; first_seen: Date; meta: any };
+// Persistent per-account seed sentinel. The old heuristic (seed = message
+// seen-map empty) permanently re-seeded accounts with genuinely empty
+// inboxes, which both re-posted the "watcher online" snapshot on every poll
+// and muted ALL notification kinds for that account forever (seed polls
+// swallow notes). A real inbox-empty account must seed exactly once.
+const SEED_KIND = "__seed__";
+
+async function accountSeeded(acct: string): Promise<boolean> {
+  return (await seenMap(acct, SEED_KIND)).size > 0;
+}
 
 async function seenMap(acct: string, kind: string): Promise<Map<string, SeenRow>> {
   const rows = await sql`
@@ -444,9 +453,9 @@ async function doPollAllOnce(post = true): Promise<{ notes: DigestNote[]; errors
     const acct = accountKey(inst);
     try {
       const client = await getClient(inst);
-      // A kind is in "seed" mode the first time we see any state for it.
-      const msgSeen = await seenMap(acct, "message");
-      const seed = msgSeen.size === 0;
+      // Seed exactly once per account (sentinel row), NOT per empty inbox —
+      // see the SEED_KIND note above.
+      const seed = !(await accountSeeded(acct));
       if (seed) seededAny = true;
       const acctSnap: string[] = [];
       const ctx: PollCtx = { client, acct, seed, snapshot: acctSnap, notes, pastCsns: new Set() };
@@ -456,6 +465,7 @@ async function doPollAllOnce(post = true): Promise<{ notes: DigestNote[]; errors
       await pollResults(ctx).catch((e) => errors.push(`${acct} results: ${errStr(e)}`));
       await pollBilling(ctx).catch((e) => errors.push(`${acct} billing: ${errStr(e)}`));
       if (seed && acctSnap.length) snapshot.push(`— ${label(acct)} —`, ...acctSnap);
+      await markSeen(acct, SEED_KIND, "ok");
     } catch (e) {
       const msg = `${acct}: ${errStr(e)}`;
       errors.push(msg);

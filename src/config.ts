@@ -35,7 +35,10 @@ export function loadInstances(): InstanceConfig[] {
   const gfilter = process.env.GMAIL_FROM_FILTER;
   if (gcId && gcSec && grt) {
     for (const inst of arr) {
-      if (!inst.passkey && !inst.totpSecret && !inst.gmail) {
+      // Attach to EVERY account without its own creds — passkey/TOTP accounts
+      // still need email 2FA as the manual-login fallback (their primary path
+      // stays passkey/TOTP; this only feeds the begin_login ladder).
+      if (!inst.gmail) {
         inst.gmail = { clientId: gcId, clientSecret: gcSec, refreshToken: grt, fromFilter: gfilter || "" };
       }
     }
